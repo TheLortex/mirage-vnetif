@@ -15,61 +15,56 @@
  *)
 
 open Mirage_net
-open Lwt.Infix
 
 let src = Logs.Src.create "vnetif" ~doc:"in-memory network interface"
 module Log = (val Logs.src_log src : Logs.LOG)
 
 module type BACKEND = sig
-    type 'a io = 'a Lwt.t
     type buffer = Cstruct.t
     type id = int
     type macaddr = Macaddr.t
     type t
 
-    val register : t -> (id, Net.error) result
-    val unregister : t -> id -> unit io
+    val register : t -> id Error.r
+    val unregister : t -> id -> unit
     val mac : t -> id -> macaddr
-    val write : t -> id -> size:int -> (buffer -> int) -> (unit, Net.error) result io
-    val set_listen_fn : t -> id -> (buffer -> unit io) -> unit
-    val unregister_and_flush : t -> id -> unit io
+    val writev : t -> id -> buffer list -> unit Error.r
+    val set_listen_fn : t -> id -> (buffer -> unit) -> unit
+    val unregister_and_flush : t -> id -> unit
 end
 
 module Make (B : BACKEND) = struct
-  type error = Net.error
-  let pp_error = Mirage_net.Net.pp_error
-
   type t = {
     id : B.id;
     backend : B.t;
-    mutable wake_on_disconnect : unit Lwt.u option; (* woken up when disconnect is called, used by listen *)
-    unlock_on_listen: Lwt_mutex.t option; (* unlocked when listen is called, used by tests *)
+    mutable wake_on_disconnect : unit Eio.Promise.u option; (* woken up when disconnect is called, used by listen *)
+    unlock_on_listen: Eio.Eio_mutex.t option; (* unlocked when listen is called, used by tests *)
     size_limit : int option;
     stats : stats;
-    monitor_fn : (B.buffer -> unit Lwt.t) option;
+    monitor_fn : (B.buffer -> unit) option;
     flush_on_disconnect : bool;
   }
 
   let connect ?size_limit ?flush_on_disconnect:(flush_on_disconnect=false) ?monitor_fn ?unlock_on_listen backend =
     match (B.register backend) with
-    | Error _ -> Lwt.fail_with "vnetif: error while registering to backend"
+    | Error _ -> failwith "vnetif: error while registering to backend"
     | Ok id ->
       let stats = { rx_bytes = 0L ; rx_pkts = 0l; tx_bytes = 0L; tx_pkts = 0l } in
-      let t = { id; size_limit; backend; stats; wake_on_disconnect=None; unlock_on_listen; monitor_fn; flush_on_disconnect } in
-      Lwt.return t
+      { id; size_limit; backend; stats; wake_on_disconnect=None; unlock_on_listen; monitor_fn; flush_on_disconnect }
 
   let mtu t = match t.size_limit with None -> 1500 | Some x -> x
 
   let disconnect t =
     (match t.flush_on_disconnect with
     | true -> B.unregister_and_flush t.backend t.id
-    | false -> B.unregister t.backend t.id) >>= fun () ->
+    | false -> B.unregister t.backend t.id);
     (* If a listen call is blocking wake it up so it can exit *)
     match t.wake_on_disconnect with
-    | None -> Lwt.return_unit
-    | Some e -> (Lwt.wakeup e ()); Lwt.return_unit
+    | None -> ()
+    | Some e -> (Eio.Promise.resolve e ())
 
-  let write t ~size fill =
+  let writev t iovec =
+    let size = Cstruct.lenv iovec in
     let size =
       match t.size_limit with
       | Some l -> min size (l + 14)
@@ -79,19 +74,11 @@ module Make (B : BACKEND) = struct
     t.stats.tx_pkts <- Int32.succ t.stats.tx_pkts;
     (* Write copy of buffer to monitor function (if enabled) *)
     (match t.monitor_fn with
-    | Some fn -> begin
-        (* Create and fill a new buffer. This requires that the fill-function can
-        be called more than once for the same data. *)
-        let buf = Cstruct.create size in
-        let len = fill buf in
-        assert (len <= size);
-        let buf = Cstruct.sub buf 0 len in
-        fn buf
-      end
-    | None -> Lwt.return_unit)
-    >>= fun () ->
-    B.write t.backend t.id ~size fill
+    | Some fn -> fn (Cstruct.concat iovec)
+    | None -> ());
+    B.writev t.backend t.id iovec
 
+  
   let listen t ~header_size:_ fn =
     (* Add counters to the listener function *)
     let listener t fn buf =
@@ -103,17 +90,17 @@ module Make (B : BACKEND) = struct
     (* Wrap the backend listen function in a monitor_fn call when enabled *)
     (match t.monitor_fn with
     | None -> B.set_listen_fn t.backend t.id (listener t fn)
-    | Some m_fn -> B.set_listen_fn t.backend t.id (fun buf -> m_fn buf >>= fun () -> (listener t fn) buf));
+    | Some m_fn -> B.set_listen_fn t.backend t.id (fun buf -> m_fn buf; (listener t fn) buf));
 
     (* Unlock listener lock to allow tests to proceed *)
     (match t.unlock_on_listen with
     | None -> ()
-    | Some l -> Lwt_mutex.unlock l);
+    | Some l -> Eio.Eio_mutex.unlock l);
 
     (* Block until woken up by disconnect *)
-    let task, waker = MProf.Trace.named_task "Netif.listen" in
+    let task, waker = Eio.Promise.create ~label:"Netif.listen" () in
     t.wake_on_disconnect <- (Some waker);
-    task >|= fun () ->
+    Eio.Promise.await task;
     Ok ()
 
   let mac t =

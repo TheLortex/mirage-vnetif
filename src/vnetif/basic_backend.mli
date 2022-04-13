@@ -14,27 +14,24 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-open Mirage_net
-
 module Make : sig
-    type 'a io = 'a Lwt.t
     type buffer = Cstruct.t
     type id = int
     type macaddr = Macaddr.t
     type t
 
-    val create : ?yield:(unit -> unit io) -> ?use_async_readers:bool -> unit -> t
-    val register : t -> (id, Net.error) result
+    val create : ?yield:(unit -> unit) -> ?use_async_readers:Eio.Switch.t -> unit -> t
+    val register : t -> id Error.r
 
     (** Unregister the listener and callback function *)
-    val unregister : t -> id -> unit io
+    val unregister : t -> id -> unit
 
     (** Unregister the listener, then block until all callbacks return for this
      * id. Useful when listeners are called in async. *)
-    val unregister_and_flush : t -> id -> unit io
+    val unregister_and_flush : t -> id -> unit
 
     val mac : t -> id -> macaddr
-    val write : t -> id -> size:int -> (buffer -> int) -> (unit, Net.error) result io
-    val set_listen_fn : t -> id -> (buffer -> unit io) -> unit
+    val writev : t -> id -> buffer list -> unit Error.r
+    val set_listen_fn : t -> id -> (buffer -> unit) -> unit
 
 end

@@ -13,28 +13,25 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
-open Lwt
 
 module Make = struct
-    type 'a io = 'a Lwt.t
     type buffer = Cstruct.t
     type id = int
     type macaddr = Macaddr.t
 
     type c = {
         mutable callback_counter : int;
-        cond : int Lwt_condition.t;
-        mutex : Lwt_mutex.t;
+        cond : int Eio.Condition.t;
+        mutex : Eio.Eio_mutex.t;
     }
 
     type t = {
         mutable last_id : int;
         mutable call_counter : int;
-        use_async_readers : bool;
-        yield : (unit -> unit io);
-        listener_callback : ((buffer -> unit io) -> c -> buffer -> unit io);
+        yield : (unit -> unit);
+        listener_callback : ((buffer -> unit) -> c -> buffer -> unit);
         listener_callbacks_in_progress : (int, c) Hashtbl.t;
-        listeners : (int, buffer -> unit io) Hashtbl.t;
+        listeners : (int, buffer -> unit) Hashtbl.t;
         macs : (int, macaddr) Hashtbl.t;
     }
 
@@ -45,62 +42,59 @@ module Make = struct
         Macaddr.make_local (Array.get base_mac)
 
     let dec_callback_counter c =
-        Lwt_mutex.with_lock c.mutex (
-            fun () -> (c.callback_counter <- c.callback_counter - 1);
-            Lwt.return_unit
-        ) >>= fun () ->
-        Lwt.return (Lwt_condition.signal c.cond 0)
+        Eio.Eio_mutex.with_lock c.mutex (
+            fun () -> (c.callback_counter <- c.callback_counter - 1)
+        );
+        Eio.Condition.signal c.cond 0
 
     let inc_callback_counter c =
-        Lwt_mutex.with_lock c.mutex (
-            fun () -> (c.callback_counter <- c.callback_counter + 1);
-                      Lwt.return_unit
-        ) >>= fun () ->
-        Lwt.return (Lwt_condition.signal c.cond 0)
+        Eio.Eio_mutex.with_lock c.mutex (
+            fun () -> (c.callback_counter <- c.callback_counter + 1)
+        );
+        Eio.Condition.signal c.cond 0
 
-    let create ?(yield=(fun () -> Lwt.pause ())) ?(use_async_readers=false) () =
+    let create ?(yield=(fun () -> Eio.Fiber.yield ())) ?(use_async_readers) () =
         let last_id = 0 in
         let call_counter = 0 in
         let listeners = Hashtbl.create 7 in
         let macs = Hashtbl.create 7 in
         let listener_callbacks_in_progress = Hashtbl.create 7 in
-        if use_async_readers then
+        match use_async_readers with
+        | Some sw ->
             let listener_callback f c buffer =
-                inc_callback_counter c >>= fun () ->
-                Lwt.async (fun () ->
-                    f buffer >>= fun () ->
-                    dec_callback_counter c);
-                Lwt.return_unit
+                (inc_callback_counter c;
+                Eio.Fiber.fork ~sw (fun () ->
+                    f buffer;
+                    dec_callback_counter c))
             in
-            {last_id;call_counter;listeners;macs;listener_callbacks_in_progress;yield;use_async_readers;listener_callback}
-        else
+            {last_id;call_counter;listeners;macs;listener_callbacks_in_progress;yield;listener_callback}
+        | None ->
             let listener_callback f c buffer =
-                inc_callback_counter c >>= fun () ->
-                f buffer >>= fun () ->
+                inc_callback_counter c;
+                f buffer;
                 dec_callback_counter c
             in
-            {last_id;call_counter;listeners;macs;listener_callbacks_in_progress;yield;use_async_readers;listener_callback}
+            {last_id;call_counter;listeners;macs;listener_callbacks_in_progress;yield;listener_callback}
 
     let register t =
         t.last_id <- t.last_id + 1;
         Hashtbl.add t.macs t.last_id (make_mac t.last_id);
         Hashtbl.add t.listener_callbacks_in_progress t.last_id {
             callback_counter = 0;
-            cond = Lwt_condition.create();
-            mutex = Lwt_mutex.create() };
+            cond = Eio.Condition.create ();
+            mutex = Eio.Eio_mutex.create () };
         Ok t.last_id
 
     let unregister t id =
         Hashtbl.remove t.macs id;
         Hashtbl.remove t.listeners id;
-        Hashtbl.remove t.listener_callbacks_in_progress id;
-        Lwt.return_unit
+        Hashtbl.remove t.listener_callbacks_in_progress id
 
     let wait_for_callbacks c =
-        Lwt_mutex.with_lock c.mutex (fun () ->
+        Eio.Eio_mutex.with_lock c.mutex (fun () ->
             let rec loop = function
-                | 0 -> Lwt.return_unit
-                | _ -> (Lwt_condition.wait ~mutex:c.mutex c.cond >>= fun _ ->
+                | 0 -> ()
+                | _ -> (Eio.Condition.wait ~mutex:c.mutex c.cond |> ignore;
                        (loop c.callback_counter))
             in
             loop c.callback_counter
@@ -108,7 +102,7 @@ module Make = struct
 
     let unregister_and_flush t id =
         let c = Hashtbl.find t.listener_callbacks_in_progress id in
-        unregister t id >>= fun () ->
+        unregister t id;
         wait_for_callbacks c
 
     let mac t id =
@@ -117,29 +111,31 @@ module Make = struct
     let set_listen_fn t id fn =
         Hashtbl.replace t.listeners id fn
 
-    let buffer_copy src =
-        let len = Cstruct.length src in
+    let buffers_copy src =
+        let len = Cstruct.lenv src in
         let dst = Cstruct.create len in
-        Cstruct.blit src 0 dst 0 len;
+        List.fold_left (fun index item -> 
+            let len = Cstruct.length item in
+            Cstruct.blit item 0 dst index len;
+            index + len
+        ) 0 src |> ignore;
         dst
 
-    let write t id ~size fill =
+    let writev t id iovec =
         let keys = Hashtbl.fold (fun k _v lst -> k::lst) t.listeners [] in
-        let send t buf src dst =
+        let send t bufs src dst =
           if src != dst then
             begin
               t.call_counter <- t.call_counter + 1;
               let fn = (Hashtbl.find t.listeners dst) in
               let c = (Hashtbl.find t.listener_callbacks_in_progress dst) in
-              t.listener_callback fn c (buffer_copy buf)
-            end else
-            Lwt.return_unit
+              t.listener_callback fn c (buffers_copy bufs)
+            end 
+          else
+            ()
         in
-        let buf = Cstruct.create size in
-        let len = fill buf in
-        assert (len <= size) ;
-        let buf = Cstruct.sub buf 0 len in
-        Lwt_list.iter_s (send t buf id) keys >>= fun () ->
-        t.yield () >|= fun () -> Ok ()
+        List.iter (send t iovec id) keys;
+        t.yield ();
+        Ok ()
 
 end

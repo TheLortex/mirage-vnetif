@@ -14,83 +14,101 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-open Lwt.Infix
-
-module Stack(B: Vnetif.BACKEND) = struct
-  module V = Vnetif_stack.Vnetif_stack(B)(Mirage_random_test)(Time)(Mclock)
+module Stack (B : Vnetif.BACKEND) = struct
+  module V = Vnetif_stack.Vnetif_stack (B) (Mirage_random_test) (Time) (Mclock)
   include V
 end
 
-let connect_test_lwt _ () =
+let buffer = Cstruct.create 1024
+
+let connect_test env () =
   let module Backend = Basic_backend.Make in
-  let module Stack = Stack(Backend) in
-  let backend = Backend.create ~use_async_readers:true ~yield:Lwt.pause () in
+  let module Stack = Stack (Backend) in
+  Eio.Switch.run @@ fun sw ->
+  let clock = Eio.Stdenv.clock env in
+  let backend = Backend.create ~use_async_readers:sw () in
 
   let test_msg = "This is a connect test. ABCDEFGHIJKLMNOPQRSTUVWXYZ" in
 
   let or_error name fn t =
-    fn t >>= function
-    | Error e -> Alcotest.failf "%s: %s" name (Format.asprintf "%a" Stack.V4.TCPV4.pp_error e)
-    | Ok t    -> Lwt.return t
+    match fn t with
+    | Error e ->
+        Alcotest.failf "%s: %s" name (Format.asprintf "%a" Error.pp_trace e)
+    | Ok t -> t
   in
 
   let accept client_l flow expected =
-    or_error "read" Stack.V4.TCPV4.read flow >>= function
-    | `Eof -> Alcotest.failf "eof while reading from socket"
-    | `Data data ->
-        let recv_str = Cstruct.to_string data in
-        Alcotest.(check string) "server and client strings matched" expected recv_str;
-        Lwt_mutex.unlock client_l;
-        Lwt.return_unit
+    match Eio.Flow.read flow buffer with
+    | exception End_of_file -> Alcotest.failf "eof while reading from socket"
+    | len ->
+        let recv_str = Cstruct.to_string ~len buffer in
+        Alcotest.(check string)
+          "server and client strings matched" expected recv_str;
+        Eio.Eio_mutex.unlock client_l
   in
 
   let client_cidr = Ipaddr.V4.Prefix.of_string_exn "10.0.0.10/24" in
   let server_cidr = Ipaddr.V4.Prefix.of_string_exn "10.0.0.11/24" in
 
-  let timeout_in_s = 5 in
+  let timeout_in_s = 1. in
 
   (* mutex to signal success from server to client *)
-  let accept_l = Lwt_mutex.create () in
+  let accept_l = Eio.Eio_mutex.create () in
   (* mutex to signal client that server is listening *)
-  let listen_l = Lwt_mutex.create () in
-  (Lwt_mutex.with_lock accept_l (fun _ ->
-    Lwt_mutex.with_lock listen_l (fun _ ->
-      Lwt.pick [
-          (* Cancellation timer *)
-          (Time.sleep_ns (Duration.of_sec timeout_in_s) >>= fun () ->
-          Alcotest.failf "timeout: test timed out after %d seconds" timeout_in_s);
+  let listen_l = Eio.Eio_mutex.create () in
 
-          (* Server side *)
-          (Stack.create_stack_ipv4 ~cidr:server_cidr ~unlock_on_listen:listen_l backend >>= fun s1 ->
-          Stack.V4.TCPV4.listen (Stack.V4.tcpv4 s1) ~port:80 (fun f -> accept accept_l f test_msg);
-          Stack.V4.listen s1 >>= fun () ->
-          Alcotest.failf "server: listen should never exit");
-
-          (* Client side *)
-          Lwt_mutex.lock listen_l >>= fun () -> (* wait for server to unlock with call to listen *)
-          Stack.create_stack_ipv4 ~cidr:client_cidr backend >>= fun s2 ->
-          or_error "connect" (Stack.V4.TCPV4.create_connection (Stack.V4.tcpv4 s2)) (Ipaddr.V4.Prefix.address server_cidr, 80) >>= fun flow ->
-          Stack.V4.TCPV4.write flow (Cstruct.of_string test_msg) >>= (function
-              | Ok () -> Lwt.return_unit
-              | Error e -> Alcotest.failf "write: %s" (Format.asprintf "%a" Stack.V4.TCPV4.pp_write_error e))
-          >>= fun () ->
-          Stack.V4.TCPV4.close flow >>= fun () ->
-          Lwt_mutex.lock accept_l (* wait for accept to unlock *)
-      ]
-    )
-  )
- )
+  Eio.Eio_mutex.with_lock accept_l (fun _ ->
+      Eio.Eio_mutex.with_lock listen_l (fun _ ->
+          Eio.Fiber.any
+            [
+              (* Cancellation timer *)
+              (fun () ->
+                Eio.Time.sleep clock timeout_in_s;
+                Eio.Switch.fail sw (Failure "timeout");
+                Alcotest.failf "timeout: test timed out after %f seconds"
+                  timeout_in_s);
+              (* Server side *)
+              (fun () ->
+                Eio.Switch.run @@ fun sw ->
+                let s1 =
+                  Stack.create_stack_ipv4 ~sw ~clock ~cidr:server_cidr
+                    ~unlock_on_listen:listen_l backend
+                in
+                Stack.V4.TCPV4.listen (Stack.V4.tcpv4 s1) ~port:80 (fun f ->
+                    accept accept_l f test_msg);
+                Stack.V4.listen s1;
+                Alcotest.failf "server: listen should never exit");
+              (* Client side *)
+              (fun () ->
+                try
+                  Eio.Switch.run @@ fun sw ->
+                  Eio.Eio_mutex.lock listen_l;
+                  (* wait for server to unlock with call to listen *)
+                  let s2 =
+                    Stack.create_stack_ipv4 ~sw ~clock ~cidr:client_cidr backend
+                  in
+                  let flow =
+                    or_error "connect"
+                      (Stack.V4.TCPV4.create_connection (Stack.V4.tcpv4 s2))
+                      (Ipaddr.V4.Prefix.address server_cidr, 80)
+                  in
+                  (try
+                     Eio.Flow.copy
+                       (Eio.Flow.cstruct_source [ Cstruct.of_string test_msg ])
+                       flow
+                   with End_of_file -> Alcotest.failf "write: end_of_file");
+                  Eio.Flow.shutdown flow `All;
+                  Eio.Eio_mutex.lock accept_l;
+                  (* wait for accept to unlock *)
+                  Eio.Switch.fail sw Not_found
+                with Not_found -> ());
+            ]))
 
 let () =
   let rand_seed = 0 in
   Random.init rand_seed;
   Printf.printf "Testing with rand_seed %d\n" rand_seed;
-
   (*Mirage_random_test.initialize();*)
-
-  Lwt_main.run @@
-  Alcotest_lwt.run "mirage-vnetif" [
-      ("stack.v4",
-          [ Alcotest_lwt.test_case "connect" `Quick connect_test_lwt ]
-      )
-  ]
+  Eio_linux.run @@ fun env ->
+  Alcotest.run "mirage-vnetif"
+    [ ("stack.v4", [ Alcotest.test_case "connect" `Quick (connect_test env) ]) ]

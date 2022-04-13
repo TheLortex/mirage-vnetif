@@ -3,6 +3,6 @@
  (public_name mirage-vnetif)
  (modules basic_backend vnetif)
  (wrapped false)
- (libraries cstruct lwt lwt.unix ipaddr macaddr
+ (libraries cstruct ipaddr macaddr
    duration result mirage-net logs mirage-profile
    ))

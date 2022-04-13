@@ -15,27 +15,24 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-open Mirage_net
-
 module type BACKEND = sig
-  type 'a io = 'a Lwt.t
   type buffer = Cstruct.t
   type id = int
   type macaddr = Macaddr.t
   type t
 
-  val register : t -> (id, Net.error) result
-  val unregister : t -> id -> unit io
+  val register : t -> id Error.r
+  val unregister : t -> id -> unit
   val mac : t -> id -> macaddr
-  val write : t -> id -> size:int -> (buffer -> int) -> (unit, Net.error) result io
-  val set_listen_fn : t -> id -> (buffer -> unit io) -> unit
-  val unregister_and_flush : t -> id -> unit io
+  val writev : t -> id -> buffer list -> unit Error.r
+  val set_listen_fn : t -> id -> (buffer -> unit) -> unit
+  val unregister_and_flush : t -> id -> unit
 end
 
 
 (** Dummy interface for software bridge. *)
 module Make(B : BACKEND) : sig
   include Mirage_net.S
-  val connect : ?size_limit:int -> ?flush_on_disconnect:bool -> ?monitor_fn:(B.buffer -> unit Lwt.t) -> ?unlock_on_listen:Lwt_mutex.t -> B.t -> t Lwt.t
-  val disconnect : t -> unit Lwt.t
+  val connect : ?size_limit:int -> ?flush_on_disconnect:bool -> ?monitor_fn:(B.buffer -> unit) -> ?unlock_on_listen:Eio.Eio_mutex.t -> B.t -> t
+  val disconnect : t -> unit
 end
