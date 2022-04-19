@@ -29,7 +29,7 @@ sig
     backend -> V4.t
 end
 
-module Vnetif_stack (B : Vnetif.BACKEND)(R : Mirage_random.S)(Time : Mirage_time.S)(Mclock : Mirage_clock.MCLOCK):
+module Vnetif_stack (B : Vnetif.BACKEND)(R : Mirage_random.S)(Mclock : Mirage_clock.MCLOCK):
           Vnetif_stack with type backend = B.t =
 struct
   type backend = B.t
@@ -44,7 +44,7 @@ struct
   module Icmp = Icmpv4.Make(Ip)
   module U = Udp.Make(Ip)(R)
   module T = Tcp.Flow.Make(Ip)(Mclock)(R)
-  module V4 = Tcpip_stack_direct.Make(Time)(R)(V)(E)(A)(Ip)(Icmp)(U)(T)
+  module V4 = Tcpip_stack_direct.Make(R)(V)(E)(A)(Ip)(Icmp)(U)(T)
 
   let create_stack_ipv4 ~sw ~clock ~cidr ?gateway ?mtu ?monitor_fn ?unlock_on_listen backend =
     let netif = V.connect ?size_limit:mtu ?monitor_fn ?unlock_on_listen backend in
