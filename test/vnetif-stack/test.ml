@@ -15,7 +15,7 @@
  *)
 
 module Stack (B : Vnetif.BACKEND) = struct
-  module V = Vnetif_stack.Vnetif_stack (B) (Mirage_random_test) (Time) (Mclock)
+  module V = Vnetif_stack.Vnetif_stack (B) (Mirage_random_test) (Mclock)
   include V
 end
 
