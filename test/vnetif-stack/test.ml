@@ -44,7 +44,7 @@ let connect_test env () =
         let recv_str = Cstruct.to_string ~len buffer in
         Alcotest.(check string)
           "server and client strings matched" expected recv_str;
-        Eio.Eio_mutex.unlock client_l
+        Eio.Mutex.unlock client_l
   in
 
   let client_cidr = Ipaddr.V4.Prefix.of_string_exn "10.0.0.10/24" in
@@ -53,12 +53,12 @@ let connect_test env () =
   let timeout_in_s = 1. in
 
   (* mutex to signal success from server to client *)
-  let accept_l = Eio.Eio_mutex.create () in
+  let accept_l = Eio.Mutex.create () in
   (* mutex to signal client that server is listening *)
-  let listen_l = Eio.Eio_mutex.create () in
+  let listen_l = Eio.Mutex.create () in
 
-  Eio.Eio_mutex.with_lock accept_l (fun _ ->
-      Eio.Eio_mutex.with_lock listen_l (fun _ ->
+  Eio.Mutex.with_lock accept_l (fun _ ->
+      Eio.Mutex.with_lock listen_l (fun _ ->
           Eio.Fiber.any
             [
               (* Cancellation timer *)
@@ -82,7 +82,8 @@ let connect_test env () =
               (fun () ->
                 try
                   Eio.Switch.run @@ fun sw ->
-                  Eio.Eio_mutex.lock listen_l;
+                  Eio.Mutex.lock listen_l;
+                  Eio.Mutex.lock listen_l; (* Netif.listen is called twice, so the mutex is unlocked twice. *)
                   (* wait for server to unlock with call to listen *)
                   let s2 =
                     Stack.create_stack_ipv4 ~sw ~clock ~cidr:client_cidr backend
@@ -98,7 +99,7 @@ let connect_test env () =
                        flow
                    with End_of_file -> Alcotest.failf "write: end_of_file");
                   Eio.Flow.shutdown flow `All;
-                  Eio.Eio_mutex.lock accept_l;
+                  Eio.Mutex.lock accept_l;
                   (* wait for accept to unlock *)
                   Eio.Switch.fail sw Not_found
                 with Not_found -> ());

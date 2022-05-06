@@ -38,7 +38,7 @@ module Make (B : BACKEND) = struct
     id : B.id;
     backend : B.t;
     mutable wake_on_disconnect : unit Eio.Promise.u option; (* woken up when disconnect is called, used by listen *)
-    unlock_on_listen: Eio.Eio_mutex.t option; (* unlocked when listen is called, used by tests *)
+    unlock_on_listen: Eio.Mutex.t option; (* unlocked when listen is called, used by tests *)
     size_limit : int option;
     stats : stats;
     monitor_fn : (B.buffer -> unit) option;
@@ -95,7 +95,7 @@ module Make (B : BACKEND) = struct
     (* Unlock listener lock to allow tests to proceed *)
     (match t.unlock_on_listen with
     | None -> ()
-    | Some l -> Eio.Eio_mutex.unlock l);
+    | Some l -> Eio.Mutex.unlock l);
 
     (* Block until woken up by disconnect *)
     let task, waker = Eio.Promise.create ~label:"Netif.listen" () in

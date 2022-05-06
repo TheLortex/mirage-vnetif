@@ -33,6 +33,6 @@ end
 (** Dummy interface for software bridge. *)
 module Make(B : BACKEND) : sig
   include Mirage_net.S
-  val connect : ?size_limit:int -> ?flush_on_disconnect:bool -> ?monitor_fn:(B.buffer -> unit) -> ?unlock_on_listen:Eio.Eio_mutex.t -> B.t -> t
+  val connect : ?size_limit:int -> ?flush_on_disconnect:bool -> ?monitor_fn:(B.buffer -> unit) -> ?unlock_on_listen:Eio.Mutex.t -> B.t -> t
   val disconnect : t -> unit
 end

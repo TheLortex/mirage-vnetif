@@ -21,8 +21,8 @@ module Make = struct
 
     type c = {
         mutable callback_counter : int;
-        cond : int Eio.Condition.t;
-        mutex : Eio.Eio_mutex.t;
+        cond : Eio.Condition.t;
+        mutex : Eio.Mutex.t;
     }
 
     type t = {
@@ -42,16 +42,16 @@ module Make = struct
         Macaddr.make_local (Array.get base_mac)
 
     let dec_callback_counter c =
-        Eio.Eio_mutex.with_lock c.mutex (
+        Eio.Mutex.with_lock c.mutex (
             fun () -> (c.callback_counter <- c.callback_counter - 1)
         );
-        Eio.Condition.signal c.cond 0
+        Eio.Condition.broadcast c.cond
 
     let inc_callback_counter c =
-        Eio.Eio_mutex.with_lock c.mutex (
+        Eio.Mutex.with_lock c.mutex (
             fun () -> (c.callback_counter <- c.callback_counter + 1)
         );
-        Eio.Condition.signal c.cond 0
+        Eio.Condition.broadcast c.cond
 
     let create ?(yield=(fun () -> Eio.Fiber.yield ())) ?(use_async_readers) () =
         let last_id = 0 in
@@ -82,7 +82,7 @@ module Make = struct
         Hashtbl.add t.listener_callbacks_in_progress t.last_id {
             callback_counter = 0;
             cond = Eio.Condition.create ();
-            mutex = Eio.Eio_mutex.create () };
+            mutex = Eio.Mutex.create () };
         Ok t.last_id
 
     let unregister t id =
@@ -91,10 +91,10 @@ module Make = struct
         Hashtbl.remove t.listener_callbacks_in_progress id
 
     let wait_for_callbacks c =
-        Eio.Eio_mutex.with_lock c.mutex (fun () ->
+        Eio.Mutex.with_lock c.mutex (fun () ->
             let rec loop = function
                 | 0 -> ()
-                | _ -> (Eio.Condition.wait ~mutex:c.mutex c.cond |> ignore;
+                | _ -> (Eio.Condition.await ~mutex:c.mutex c.cond |> ignore;
                        (loop c.callback_counter))
             in
             loop c.callback_counter

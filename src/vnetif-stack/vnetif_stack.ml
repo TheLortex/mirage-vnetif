@@ -25,7 +25,7 @@ sig
   (** Create a new IPv4 stack connected to an existing backend *)
   val create_stack_ipv4 : sw:Eio.Switch.t -> clock:Eio.Time.clock -> cidr:Ipaddr.V4.Prefix.t ->
     ?gateway:Ipaddr.V4.t -> ?mtu:int -> ?monitor_fn:(buffer -> unit) ->
-    ?unlock_on_listen:Eio.Eio_mutex.t ->
+    ?unlock_on_listen:Eio.Mutex.t ->
     backend -> V4.t
 end
 
