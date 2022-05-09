@@ -4,5 +4,5 @@
  (modules basic_backend vnetif)
  (wrapped false)
  (libraries cstruct ipaddr macaddr
-   duration result mirage-net logs mirage-profile
+   duration mirage-net logs mirage-profile
    ))
