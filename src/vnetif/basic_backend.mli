@@ -21,7 +21,8 @@ module Make : sig
     type t
 
     val create : ?yield:(unit -> unit) -> ?use_async_readers:Eio.Switch.t -> unit -> t
-    val register : t -> id Error.r
+    val disconnect : t -> unit
+    val register : t -> id
 
     (** Unregister the listener and callback function *)
     val unregister : t -> id -> unit
@@ -31,7 +32,7 @@ module Make : sig
     val unregister_and_flush : t -> id -> unit
 
     val mac : t -> id -> macaddr
-    val writev : t -> id -> buffer list -> unit Error.r
+    val writev : t -> id -> buffer list -> unit
     val set_listen_fn : t -> id -> (buffer -> unit) -> unit
 
 end

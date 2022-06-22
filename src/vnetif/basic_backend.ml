@@ -21,7 +21,7 @@ module Make = struct
 
     type c = {
         mutable callback_counter : int;
-        cond : Eio.Condition.t;
+        cond : unit Eio.Condition.t;
         mutex : Eio.Mutex.t;
     }
 
@@ -33,6 +33,7 @@ module Make = struct
         listener_callbacks_in_progress : (int, c) Hashtbl.t;
         listeners : (int, buffer -> unit) Hashtbl.t;
         macs : (int, macaddr) Hashtbl.t;
+        disconnect : unit -> unit;
     }
 
     let make_mac id =
@@ -45,14 +46,24 @@ module Make = struct
         Eio.Mutex.with_lock c.mutex (
             fun () -> (c.callback_counter <- c.callback_counter - 1)
         );
-        Eio.Condition.broadcast c.cond
+        Eio.Condition.broadcast c.cond ()
 
     let inc_callback_counter c =
         Eio.Mutex.with_lock c.mutex (
             fun () -> (c.callback_counter <- c.callback_counter + 1)
         );
-        Eio.Condition.broadcast c.cond
+        Eio.Condition.broadcast c.cond ()
 
+
+    let rec async_listener_callback sw stream =
+        let (f, c, buffer) = Eio.Stream.take stream in
+        inc_callback_counter c;
+        Eio.Fiber.fork ~sw (fun () ->
+            Eio.Private.Ctf.label "vnetif.async_listener_callback";
+            f buffer; 
+            dec_callback_counter c);
+        async_listener_callback sw stream
+    
     let create ?(yield=(fun () -> Eio.Fiber.yield ())) ?(use_async_readers) () =
         let last_id = 0 in
         let call_counter = 0 in
@@ -61,29 +72,34 @@ module Make = struct
         let listener_callbacks_in_progress = Hashtbl.create 7 in
         match use_async_readers with
         | Some sw ->
-            let listener_callback f c buffer =
-                (inc_callback_counter c;
-                Eio.Fiber.fork ~sw (fun () ->
-                    f buffer;
-                    dec_callback_counter c))
+            let packet_stream = Eio.Stream.create max_int in
+            let disconnect_promise, disconnect_resolve = Eio.Promise.create () in
+            Eio.Fiber.fork ~sw (fun () -> 
+              Eio.Fiber.first ~label:"vnetif.async_listener_callback.loop"
+                (fun () -> async_listener_callback sw packet_stream)
+                (fun () -> Eio.Promise.await disconnect_promise));
+            let listener_callback f c buffer = Eio.Stream.add packet_stream (f, c, buffer)
             in
-            {last_id;call_counter;listeners;macs;listener_callbacks_in_progress;yield;listener_callback}
+            let disconnect () = Eio.Promise.resolve disconnect_resolve () in
+            {last_id;call_counter;listeners;macs;listener_callbacks_in_progress;yield;listener_callback;disconnect}
         | None ->
             let listener_callback f c buffer =
                 inc_callback_counter c;
                 f buffer;
                 dec_callback_counter c
             in
-            {last_id;call_counter;listeners;macs;listener_callbacks_in_progress;yield;listener_callback}
+            {last_id;call_counter;listeners;macs;listener_callbacks_in_progress;yield;listener_callback;disconnect=fun () -> ()}
 
+    let disconnect t = t.disconnect ()
+    
     let register t =
         t.last_id <- t.last_id + 1;
         Hashtbl.add t.macs t.last_id (make_mac t.last_id);
         Hashtbl.add t.listener_callbacks_in_progress t.last_id {
             callback_counter = 0;
-            cond = Eio.Condition.create ();
-            mutex = Eio.Mutex.create () };
-        Ok t.last_id
+            cond = Eio.Condition.create ~label:("vnetif.basic_backend.condition_"^string_of_int t.last_id) ();
+            mutex = Eio.Mutex.create ~label:("vnetif.basic_backend.mutex_"^string_of_int t.last_id) () };
+        t.last_id
 
     let unregister t id =
         Hashtbl.remove t.macs id;
@@ -135,7 +151,6 @@ module Make = struct
             ()
         in
         List.iter (send t iovec id) keys;
-        t.yield ();
-        Ok ()
+        t.yield ()
 
 end

@@ -49,7 +49,7 @@ struct
   let create_stack_ipv4 ~sw ~clock ~cidr ?gateway ?mtu ?monitor_fn ?unlock_on_listen backend =
     let netif = V.connect ?size_limit:mtu ?monitor_fn ?unlock_on_listen backend in
     let ethif = E.connect netif in
-    let arp = A.connect ~sw ethif clock in
+    let arp = A.connect ~sw ~clock ethif  in
     let ipv4 = Ip.connect ~cidr ?gateway ethif arp in
     let icmp = Icmp.connect ipv4 in
     let udp = U.connect ipv4 in

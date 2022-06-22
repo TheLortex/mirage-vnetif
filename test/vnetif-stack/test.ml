@@ -30,12 +30,6 @@ let connect_test env () =
 
   let test_msg = "This is a connect test. ABCDEFGHIJKLMNOPQRSTUVWXYZ" in
 
-  let or_error name fn t =
-    match fn t with
-    | Error e ->
-        Alcotest.failf "%s: %s" name (Format.asprintf "%a" Error.pp_trace e)
-    | Ok t -> t
-  in
 
   let accept client_l flow expected =
     match Eio.Flow.read flow buffer with
@@ -88,9 +82,7 @@ let connect_test env () =
                   let s2 =
                     Stack.create_stack_ipv4 ~sw ~clock ~cidr:client_cidr backend
                   in
-                  let flow =
-                    or_error "connect"
-                      (Stack.V4.TCPV4.create_connection (Stack.V4.tcpv4 s2))
+                  let flow = Stack.V4.TCPV4.create_connection (Stack.V4.tcpv4 s2)
                       (Ipaddr.V4.Prefix.address server_cidr, 80)
                   in
                   (try
@@ -103,13 +95,15 @@ let connect_test env () =
                   (* wait for accept to unlock *)
                   Eio.Switch.fail sw Not_found
                 with Not_found -> ());
-            ]))
+            ]));
+    Backend.disconnect backend
 
 let () =
   let rand_seed = 0 in
   Random.init rand_seed;
   Printf.printf "Testing with rand_seed %d\n" rand_seed;
   (*Mirage_random_test.initialize();*)
+  Eio_unix.Ctf.with_tracing "trace.ctf" @@ fun () ->
   Eio_linux.run @@ fun env ->
   Alcotest.run "mirage-vnetif"
     [ ("stack.v4", [ Alcotest.test_case "connect" `Quick (connect_test env) ]) ]

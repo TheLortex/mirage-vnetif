@@ -21,10 +21,10 @@ module type BACKEND = sig
   type macaddr = Macaddr.t
   type t
 
-  val register : t -> id Error.r
+  val register : t -> id
   val unregister : t -> id -> unit
   val mac : t -> id -> macaddr
-  val writev : t -> id -> buffer list -> unit Error.r
+  val writev : t -> id -> buffer list -> unit
   val set_listen_fn : t -> id -> (buffer -> unit) -> unit
   val unregister_and_flush : t -> id -> unit
 end

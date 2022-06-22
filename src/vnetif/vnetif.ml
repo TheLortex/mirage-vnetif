@@ -25,10 +25,10 @@ module type BACKEND = sig
     type macaddr = Macaddr.t
     type t
 
-    val register : t -> id Error.r
+    val register : t -> id
     val unregister : t -> id -> unit
     val mac : t -> id -> macaddr
-    val writev : t -> id -> buffer list -> unit Error.r
+    val writev : t -> id -> buffer list -> unit
     val set_listen_fn : t -> id -> (buffer -> unit) -> unit
     val unregister_and_flush : t -> id -> unit
 end
@@ -46,11 +46,9 @@ module Make (B : BACKEND) = struct
   }
 
   let connect ?size_limit ?flush_on_disconnect:(flush_on_disconnect=false) ?monitor_fn ?unlock_on_listen backend =
-    match (B.register backend) with
-    | Error _ -> failwith "vnetif: error while registering to backend"
-    | Ok id ->
-      let stats = { rx_bytes = 0L ; rx_pkts = 0l; tx_bytes = 0L; tx_pkts = 0l } in
-      { id; size_limit; backend; stats; wake_on_disconnect=None; unlock_on_listen; monitor_fn; flush_on_disconnect }
+    let id = B.register backend in
+    let stats = { rx_bytes = 0L ; rx_pkts = 0l; tx_bytes = 0L; tx_pkts = 0l } in
+    { id; size_limit; backend; stats; wake_on_disconnect=None; unlock_on_listen; monitor_fn; flush_on_disconnect }
 
   let mtu t = match t.size_limit with None -> 1500 | Some x -> x
 
@@ -100,8 +98,7 @@ module Make (B : BACKEND) = struct
     (* Block until woken up by disconnect *)
     let task, waker = Eio.Promise.create ~label:"Netif.listen" () in
     t.wake_on_disconnect <- (Some waker);
-    Eio.Promise.await task;
-    Ok ()
+    Eio.Promise.await task
 
   let mac t =
     B.mac t.backend t.id
